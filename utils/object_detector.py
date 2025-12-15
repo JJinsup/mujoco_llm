@@ -1,39 +1,83 @@
+# utils/object_detector.py
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Any
+
 import numpy as np
-from ultralytics import YOLO
+
+try:
+    from ultralytics import YOLO
+    _YOLO_AVAILABLE = True
+except ImportError:
+    YOLO = None  # type: ignore
+    _YOLO_AVAILABLE = False
+
+
+@dataclass
+class DetectedBox:
+    confidence: float
+    bbox: list  # [x1, y1, x2, y2]
+    center: list  # [cx, cy]
+
 
 class ObjectDetector:
-    def __init__(self, model_path="best.pt", conf=0.3):
-        self.model = YOLO(model_path)
+    """
+    YOLO detector adapter.
+
+    - Keeps ultralytics dependency inside utils layer
+    - Provides structured dict output for downstream logic
+    - Thread-safe inference with internal lock
+    """
+
+    def __init__(self, weight_path: str, conf: float = 0.5):
+        if not _YOLO_AVAILABLE:
+            raise ImportError("ultralytics is not installed. Install it to use ObjectDetector.")
+        self.weight_path = weight_path
         self.conf = conf
+        self.model = YOLO(weight_path)
+        self._lock = threading.Lock()
 
-    def detect(self, image: np.ndarray):
-        results = self.model(image, conf=self.conf, device="cpu", verbose=False)
-        w = image.shape[1]
+    @property
+    def available(self) -> bool:
+        return _YOLO_AVAILABLE and self.model is not None
 
-        info = {}
-        for result in results:
-            for box in result.boxes:
-                cls = int(box.cls[0].item())
-                label = self.model.names[cls]
-                x, _, _, _ = map(int, box.xywh[0])
-                confidence = round(box.conf[0].item(), 2)
-                
-                if x < w / 3:
-                    direction = "왼쪽"
-                elif x > w * 2 / 3:
-                    direction = "오른쪽"
-                else:
-                    direction = "중앙"
-                
-                # 동일 label에 대해 정보가 없다면 초기화
-                if (label not in info) or (confidence > info[label].get("confidence", 0)):
-                    info[label] = {"label": label, "direction": direction}
-        detection_list = [{"label": v["label"], "direction": v["direction"]} for v in info.values()]
-        observation = ", ".join(f"{d['label']}:{d['direction']}" for d in detection_list)
-        return observation
-    
-    def predict(self, img):
-        # img: np.ndarray (BGR, OpenCV)
-        results = self.model(img, device="cpu", verbose=False)[0]
-        result_img = results.plot()
-        return result_img
+    def detect_dict(self, frame_bgr: np.ndarray) -> Dict[str, List[dict]]:
+        """
+        Parameters
+        - frame_bgr: np.ndarray (H, W, 3), BGR image
+
+        Returns
+        - dict[label] = list of {confidence, bbox, center}
+        """
+        if frame_bgr is None:
+            return {}
+
+        with self._lock:
+            result = self.model(frame_bgr, verbose=False, conf=self.conf)[0]
+
+        out: Dict[str, List[dict]] = {}
+        for box in result.boxes:
+            cls = int(box.cls[0].item())
+            label = result.names.get(cls)
+            confidence = float(box.conf[0].item())
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            out.setdefault(label, []).append({
+                "confidence": confidence,
+                "bbox": [x1, y1, x2, y2],
+                "center": [(x1 + x2) / 2, (y1 + y2) / 2],
+            })
+        return out
+
+    def detect_image(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Returns
+        - np.ndarray: plotted BGR image with bounding boxes, or None
+        """
+        if frame_bgr is None:
+            return None
+
+        with self._lock:
+            result = self.model(frame_bgr, verbose=False, conf=self.conf)[0]
+        return result.plot()

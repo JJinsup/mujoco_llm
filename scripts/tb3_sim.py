@@ -11,6 +11,7 @@ import numpy as np
 # 프로젝트 루트에서 utils 가져오기
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "..")))
 from utils.mujoco_renderer import MuJoCoViewer
+from utils.object_detector import ObjectDetector
 
 ACTION_TABLE = {
     "멈춤": (0.0, 0.0),
@@ -20,13 +21,6 @@ ACTION_TABLE = {
     "우회전": (8.0, 6.0),
     "제자리 회전": (4.0, -4.0),
 }
-
-try:
-    from ultralytics import YOLO
-    _YOLO_AVAILABLE = True
-except ImportError:
-    _YOLO_AVAILABLE = False
-
 
 class TurtlebotFactorySim:
     """
@@ -49,7 +43,7 @@ class TurtlebotFactorySim:
         command_queue: Queue | None = None,
         fps: int = 60,
         current_action = None,
-        action_end_sim_tim = 0.0,
+        action_end_sim_time = 0.0,
     ):
         # ===== 경로 설정 =====
         script_path = os.path.abspath(__file__)
@@ -69,7 +63,7 @@ class TurtlebotFactorySim:
         # 검색 모드 타겟 레이블
         self.search_target_label = None  
         self.current_action = current_action
-        self.action_end_sim_time = action_end_sim_tim
+        self.action_end_sim_time = action_end_sim_time
         # ===== MuJoCo 모델/데이터 로드 =====
         self.model = mj.MjModel.from_xml_path(xml_path)
         self.data = mj.MjData(self.model)
@@ -82,11 +76,9 @@ class TurtlebotFactorySim:
         self.latest_frame: np.ndarray | None = None
 
         # ===== YOLO 옵션 =====
-        self.use_yolo = use_yolo and _YOLO_AVAILABLE
-        self.yolo_conf = yolo_conf
-        self.yolo_model = None
+        self.use_yolo = use_yolo
+        self.detector = None
         self.yolo_window_name = "Robot YOLO View"
-        self._yolo_lock = threading.Lock()
 
         if self.use_yolo:
             if yolo_weight_path is None:
@@ -94,12 +86,11 @@ class TurtlebotFactorySim:
             if not os.path.exists(yolo_weight_path):
                 raise FileNotFoundError(f"YOLO weight not found: {yolo_weight_path}")
 
-            print(f"[TurtlebotFactorySim] Loading YOLO model: {yolo_weight_path}")
-            self.yolo_model = YOLO(yolo_weight_path)
+            print(f"[TurtlebotFactorySim] Loading ObjectDetector: {yolo_weight_path}")
+            self.detector = ObjectDetector(yolo_weight_path, conf=yolo_conf)
+
             cv2.namedWindow(self.yolo_window_name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(self.yolo_window_name, 640, 480)
-        elif use_yolo and not _YOLO_AVAILABLE:
-            print("[TurtlebotFactorySim] ultralytics 가 설치되어 있지 않아 YOLO를 비활성화합니다.")
 
         # ===== 명령 큐 (LLM / 키보드 등에서 넣어주는 명령) =====
         self.command_queue = command_queue if command_queue is not None else Queue()
@@ -187,40 +178,17 @@ class TurtlebotFactorySim:
             self.apply_command(cmd)
 
     def yolo_detect_dict(self):
-        if not self.use_yolo or self.yolo_model is None:
+        if (not self.use_yolo) or (self.detector is None) or (self.latest_frame is None):
             return {}
-        if self.latest_frame is None:
-            return {}
+        return self.detector.detect_dict(self.latest_frame)
 
-        with self._yolo_lock:
-            result = self.yolo_model(self.latest_frame, verbose=False, conf=self.yolo_conf)[0]
-
-        out = {}
-        for box in result.boxes:
-            cls = int(box.cls[0].item())
-            label = result.names.get(cls)
-            conf = float(box.conf[0].item())
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-
-            out.setdefault(label, []).append({
-                "confidence": conf,
-                "bbox": [x1, y1, x2, y2],
-                "center": [(x1 + x2) / 2, (y1 + y2) / 2]
-            })
-        return out
-    
     def yolo_detect_image(self):
-        if not self.use_yolo or self.yolo_model is None:
+        if (not self.use_yolo) or (self.detector is None) or (self.latest_frame is None):
             return None
-        if self.latest_frame is None:
-            return None
-
-        with self._yolo_lock:
-            result = self.yolo_model(self.latest_frame, verbose=False, conf=self.yolo_conf)[0]
-        return result.plot()
+        return self.detector.detect_image(self.latest_frame)
 
     def _run_yolo_on_latest_frame(self):
-        if not self.use_yolo or self.yolo_model is None:
+        if not self.use_yolo or self.detector is None:
             return
         img_bgr = self.yolo_detect_image()
         if img_bgr is None:

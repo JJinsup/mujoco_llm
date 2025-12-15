@@ -12,7 +12,7 @@ from utils.mujoco_renderer import MuJoCoViewer
 XML_PATH = "/data/jinsup/js_mujoco/asset/robotis_tb3/tb3_factory_cards.xml"
 
 # 저장 위치 (train 이미지)
-OUT_DIR = "train/images"
+OUT_DIR = "img_dataset/images"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 def main():
